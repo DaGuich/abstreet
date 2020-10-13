@@ -4,7 +4,7 @@ pub use speed::{SpeedControls, TimePanel};
 pub use time_warp::TimeWarpScreen;
 
 use abstutil::Timer;
-use geom::Time;
+use geom::{Circle, Time};
 use sim::AgentType;
 use widgetry::{
     lctrl, Btn, Choice, EventCtx, GfxCtx, HorizontalAlignment, Key, Line, Outcome, Panel, Text,
@@ -25,7 +25,7 @@ use crate::layer::PickLayer;
 use crate::load::{FileLoader, MapLoader};
 use crate::options::OptionsPanel;
 use crate::pregame::MainMenu;
-use crate::render::UnzoomedAgents;
+use crate::render::{unzoomed_agent_radius, UnzoomedAgents};
 
 pub mod dashboards;
 pub mod gameplay;
@@ -39,6 +39,8 @@ pub struct SandboxMode {
     pub gameplay_mode: GameplayMode,
 
     pub controls: SandboxControls,
+
+    recalc_unzoomed_agent: Option<Time>,
 }
 
 pub struct SandboxControls {
@@ -236,6 +238,7 @@ impl SandboxMode {
             },
             gameplay,
             gameplay_mode: mode,
+            recalc_unzoomed_agent: None,
         })
     }
 
@@ -290,6 +293,21 @@ impl State for SandboxMode {
         if let Some(ref mut s) = self.controls.speed {
             if let Some(t) = s.event(ctx, app, Some(&self.gameplay_mode)) {
                 return t;
+            }
+        }
+
+        // We need to recalculate unzoomed agent mouseover when the mouse is still and time passes,
+        // or when the mouse moves.
+        if app.primary.current_selection.is_none()
+            && ctx.canvas.cam_zoom < app.opts.min_zoom_for_detail
+        {
+            if ctx.redo_mouseover()
+                || self
+                    .recalc_unzoomed_agent
+                    .map(|t| t != app.primary.sim.time())
+                    .unwrap_or(true)
+            {
+                mouseover_unzoomed_agent_circle(ctx, app);
             }
         }
 
@@ -660,5 +678,31 @@ impl ContextualActions for Actions {
     }
     fn gameplay_mode(&self) -> GameplayMode {
         self.gameplay.clone()
+    }
+}
+
+fn mouseover_unzoomed_agent_circle(ctx: &mut EventCtx, app: &mut App) {
+    // TODO How do we make this efficient?
+    // - We could build and cache a quadtree if we're paused
+    // - We could always build the quadtree as we loop over unzoomed agents
+    // - At least do this while we draw? Don't call twice.
+    let cursor = if let Some(pt) = ctx.canvas.get_cursor_in_map_space() {
+        pt
+    } else {
+        return;
+    };
+
+    for a in app.primary.sim.get_unzoomed_agents(&app.primary.map) {
+        // Some circles are filtered out
+        if app.unzoomed_agents.color(&a).is_some() {
+            if Circle::new(a.pos, unzoomed_agent_radius(a.vehicle_type)).contains_pt(cursor) {
+                // TODO We have Option<Person>, we want an agent. This mapping will fail for
+                // buses.
+                if let Some(a) = a.person.and_then(|p| app.primary.sim.person_to_agent(p)) {
+                    app.primary.current_selection = Some(ID::from_agent(a));
+                }
+                break;
+            }
+        }
     }
 }
